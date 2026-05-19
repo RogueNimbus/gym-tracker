@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: nickname-gym-tracker
+    runtime: node
+    region: ohio
+    plan: starter
+    buildCommand: npm run check
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    disk:
+      name: tracker-data
+      mountPath: /opt/render/project/src/storage
+      sizeGB: 1
+    envVars:
+      - key: TRACKER_DATA_DIR
+        value: /opt/render/project/src/storage
+      - key: TRACKER_DB_FILE
+        value: /opt/render/project/src/storage/tracker-db.json
