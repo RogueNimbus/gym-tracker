@@ -3,17 +3,15 @@ services:
     name: nickname-gym-tracker
     runtime: node
     region: ohio
-    plan: starter
+    plan: free
     buildCommand: npm run check
     startCommand: npm start
     healthCheckPath: /api/health
     autoDeployTrigger: commit
-    disk:
-      name: tracker-data
-      mountPath: /opt/render/project/src/storage
-      sizeGB: 1
     envVars:
-      - key: TRACKER_DATA_DIR
-        value: /opt/render/project/src/storage
-      - key: TRACKER_DB_FILE
-        value: /opt/render/project/src/storage/tracker-db.json
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_TABLE
+        value: app_state

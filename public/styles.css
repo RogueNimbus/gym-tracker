@@ -239,6 +239,7 @@ button:focus-visible {
   padding: 10px 14px;
   color: var(--surface);
   background: var(--accent);
+  text-decoration: none;
 }
 
 .btn:hover {

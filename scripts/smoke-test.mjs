@@ -128,6 +128,12 @@ try {
   assert(daniWorkouts.length === 1, "Dani should have one workout.");
   assert(alexWorkouts.length === 0, "Alex should have separate workout history.");
 
+  const csvResponse = await fetch(`${baseUrl}/api/export/workouts.csv?profileId=${dani.id}`);
+  const csv = await csvResponse.text();
+  assert(csvResponse.ok, "CSV export should return successfully.");
+  assert(csv.includes("profile_nickname,date,start_time"), "CSV export should include headers.");
+  assert(csv.includes("Dani,2026-05-19,09:00"), "CSV export should include the saved workout.");
+
   console.log("Smoke test passed.");
 } finally {
   stopServer();

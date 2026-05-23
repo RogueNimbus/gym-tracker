@@ -13,6 +13,11 @@ const SEED_FILE = path.join(__dirname, "data", "seed-exercises.json");
 const PUBLIC_DIR = path.join(__dirname, "public");
 const WGER_SOURCE_URL = "https://wger.de/api/v2/exercise/";
 const WGER_LICENSE = "CC-BY-SA 3.0, per wger documentation for initial exercise data";
+const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const SUPABASE_TABLE = process.env.SUPABASE_TABLE || "app_state";
+const SUPABASE_STATE_ID = process.env.SUPABASE_STATE_ID || "default";
+const USE_SUPABASE = Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
 
 let writeQueue = Promise.resolve();
 
@@ -28,39 +33,30 @@ function defaultSettings() {
   };
 }
 
-async function ensureDb() {
-  await mkdir(DATA_DIR, { recursive: true });
-  if (existsSync(DB_FILE)) {
-    const db = await readDb();
-    let changed = false;
+function normalizeDb(db) {
+  let changed = false;
 
-    for (const profile of db.profiles || []) {
-      profile.settings = { ...defaultSettings(), ...(profile.settings || {}) };
-      profile.hiddenExerciseIds = profile.hiddenExerciseIds || [];
-      profile.exerciseOverrides = profile.exerciseOverrides || {};
-      profile.nicknameKey = profile.nicknameKey || profile.nickname.trim().toLowerCase();
-      changed = true;
-    }
+  db.schemaVersion = db.schemaVersion || 1;
+  db.profiles = Array.isArray(db.profiles) ? db.profiles : [];
+  db.exercises = Array.isArray(db.exercises) ? db.exercises : [];
+  db.workouts = Array.isArray(db.workouts) ? db.workouts : [];
 
-    if (!Array.isArray(db.exercises)) {
-      db.exercises = [];
-      changed = true;
-    }
-
-    if (!Array.isArray(db.workouts)) {
-      db.workouts = [];
-      changed = true;
-    }
-
-    if (changed) {
-      await saveDb(db);
-    }
-    return;
+  for (const profile of db.profiles) {
+    const previous = JSON.stringify(profile);
+    profile.settings = { ...defaultSettings(), ...(profile.settings || {}) };
+    profile.hiddenExerciseIds = profile.hiddenExerciseIds || [];
+    profile.exerciseOverrides = profile.exerciseOverrides || {};
+    profile.nicknameKey = profile.nicknameKey || profile.nickname.trim().toLowerCase();
+    changed = changed || previous !== JSON.stringify(profile);
   }
 
+  return { db, changed };
+}
+
+async function createInitialDb() {
   const rawSeed = JSON.parse(await readFile(SEED_FILE, "utf8"));
   const createdAt = nowIso();
-  const db = {
+  return {
     schemaVersion: 1,
     createdAt,
     profiles: [],
@@ -75,15 +71,89 @@ async function ensureDb() {
     })),
     workouts: []
   };
-  await saveDb(db);
+}
+
+async function ensureDb() {
+  if (USE_SUPABASE) {
+    const existing = await readSupabaseDb();
+    if (existing) {
+      const { db, changed } = normalizeDb(existing);
+      if (changed) await saveDb(db);
+      return;
+    }
+    await saveDb(await createInitialDb());
+    return;
+  }
+
+  await mkdir(DATA_DIR, { recursive: true });
+  if (existsSync(DB_FILE)) {
+    const { db, changed } = normalizeDb(await readDb());
+    if (changed) await saveDb(db);
+    return;
+  }
+
+  await saveDb(await createInitialDb());
 }
 
 async function readDb() {
+  if (USE_SUPABASE) {
+    const db = await readSupabaseDb();
+    if (db) return normalizeDb(db).db;
+    const initial = await createInitialDb();
+    await saveDb(initial);
+    return initial;
+  }
   return JSON.parse(await readFile(DB_FILE, "utf8"));
 }
 
 async function saveDb(db) {
+  if (USE_SUPABASE) {
+    await saveSupabaseDb(db);
+    return;
+  }
   await writeFile(DB_FILE, `${JSON.stringify(db, null, 2)}\n`, "utf8");
+}
+
+async function supabaseRequest(pathname, options = {}) {
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/${pathname}`, {
+    ...options,
+    headers: {
+      apikey: SUPABASE_SERVICE_ROLE_KEY,
+      authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      ...(options.headers || {})
+    }
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Supabase storage error (${response.status}): ${text.slice(0, 300)}`);
+  }
+
+  if (response.status === 204) return null;
+  const text = await response.text();
+  return text ? JSON.parse(text) : null;
+}
+
+async function readSupabaseDb() {
+  const rows = await supabaseRequest(`${encodeURIComponent(SUPABASE_TABLE)}?id=eq.${encodeURIComponent(SUPABASE_STATE_ID)}&select=data`, {
+    method: "GET"
+  });
+  return rows?.[0]?.data || null;
+}
+
+async function saveSupabaseDb(db) {
+  await supabaseRequest(`${encodeURIComponent(SUPABASE_TABLE)}?on_conflict=id`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      prefer: "resolution=merge-duplicates,return=minimal"
+    },
+    body: JSON.stringify({
+      id: SUPABASE_STATE_ID,
+      data: db,
+      updated_at: nowIso()
+    })
+  });
 }
 
 function withDb(mutator) {
@@ -107,6 +177,65 @@ function sendJson(res, status, payload) {
 
 function sendError(res, status, message, details = undefined) {
   sendJson(res, status, { error: message, details });
+}
+
+function sendText(res, status, body, headers = {}) {
+  res.writeHead(status, {
+    "cache-control": "no-store",
+    ...headers
+  });
+  res.end(body);
+}
+
+function csvCell(value) {
+  if (value === null || value === undefined) return "";
+  const text = String(value);
+  return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+}
+
+function workoutsCsv(profile, workouts) {
+  const headers = [
+    "workout_id",
+    "profile_nickname",
+    "date",
+    "start_time",
+    "end_time",
+    "energy_score",
+    "exercise_order",
+    "exercise_name",
+    "set_number",
+    "reps",
+    "weight_lb",
+    "rest_seconds",
+    "rir",
+    "created_at"
+  ];
+  const rows = [headers];
+
+  for (const workout of workouts) {
+    for (const exercise of workout.exercises) {
+      for (const set of exercise.sets) {
+        rows.push([
+          workout.id,
+          profile.nickname,
+          workout.date,
+          workout.startTime,
+          workout.endTime,
+          workout.energyScore,
+          exercise.order,
+          exercise.nameSnapshot,
+          set.setNumber,
+          set.reps,
+          set.weightLb,
+          set.restSeconds,
+          set.rir,
+          workout.createdAt
+        ]);
+      }
+    }
+  }
+
+  return `${rows.map((row) => row.map(csvCell).join(",")).join("\n")}\n`;
 }
 
 async function parseBody(req) {
@@ -296,7 +425,7 @@ function normalizeWorkout(db, body) {
 
 async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/health") {
-    return sendJson(res, 200, { ok: true });
+    return sendJson(res, 200, { ok: true, storage: USE_SUPABASE ? "supabase" : "local-file" });
   }
 
   if (req.method === "GET" && url.pathname === "/api/bootstrap") {
@@ -437,6 +566,20 @@ async function handleApi(req, res, url) {
       .filter((workout) => workout.profileId === profile.id)
       .sort((a, b) => `${b.date} ${b.startTime}`.localeCompare(`${a.date} ${a.startTime}`));
     return sendJson(res, 200, { workouts });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/export/workouts.csv") {
+    const db = await readDb();
+    const profile = findProfile(db, url.searchParams.get("profileId"));
+    if (!profile) return sendError(res, 404, "Profile was not found.");
+    const workouts = db.workouts
+      .filter((workout) => workout.profileId === profile.id)
+      .sort((a, b) => `${b.date} ${b.startTime}`.localeCompare(`${a.date} ${a.startTime}`));
+    const safeNickname = profile.nickname.replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-|-$/g, "") || "workouts";
+    return sendText(res, 200, workoutsCsv(profile, workouts), {
+      "content-type": "text/csv; charset=utf-8",
+      "content-disposition": `attachment; filename="${safeNickname}-workouts.csv"`
+    });
   }
 
   if (req.method === "POST" && url.pathname === "/api/workouts") {

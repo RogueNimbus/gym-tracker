@@ -22,6 +22,8 @@ If this Codex desktop shell says the `node` app alias is blocked, use the bundle
 
 The app stores data through the server API in `data/tracker-db.json`. That file is ignored by Git so local workout data does not get committed.
 
+On Render Free, use Supabase for storage instead of the local JSON file. Render Free does not support persistent disks, so CSV, Excel, and JSON files written by the app are not durable there.
+
 ## Test
 
 ```powershell
@@ -47,6 +49,10 @@ node --check scripts/smoke-test.mjs
 
 ## Deployment Note
 
-This version is ready to run on Render as a Node web service with a persistent disk. The deployment config lives in `render.yaml`, and the step-by-step guide is in `DEPLOYMENT.md`.
+This version is ready to run on Render Free as a Node web service with Supabase storage. The deployment config lives in `render.yaml`, and the step-by-step guide is in `DEPLOYMENT.md`.
 
 Vercel-style serverless hosting is not a good fit for the current file-backed data store because serverless files are not durable.
+
+## Spreadsheet Export
+
+The History screen includes an `Export CSV` button. Excel can open this file for backup or analysis, but the deployed app should still use Supabase for persistent storage.

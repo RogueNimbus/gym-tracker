@@ -445,6 +445,9 @@ function renderHistoryView() {
       <div class="stat"><strong>${stats.setCount}</strong><span>Sets</span></div>
       <div class="stat"><strong>${Math.round(stats.volume).toLocaleString()}</strong><span>Lb volume</span></div>
     </section>
+    <div class="button-row">
+      <a class="btn secondary" href="/api/export/workouts.csv?profileId=${encodeURIComponent(state.profile.id)}" download>Export CSV</a>
+    </div>
     <section class="workout-list">
       ${state.workouts.length === 0 ? `<div class="empty-state">No workouts yet. Your saved sessions will appear here.</div>` : ""}
       ${state.workouts.map(renderWorkoutCard).join("")}
