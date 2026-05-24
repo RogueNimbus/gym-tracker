@@ -18,6 +18,7 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const SUPABASE_TABLE = process.env.SUPABASE_TABLE || "app_state";
 const SUPABASE_STATE_ID = process.env.SUPABASE_STATE_ID || "default";
 const USE_SUPABASE = Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
+const SCHEMA_VERSION = 2;
 
 let writeQueue = Promise.resolve();
 
@@ -36,10 +37,14 @@ function defaultSettings() {
 function normalizeDb(db) {
   let changed = false;
 
-  db.schemaVersion = db.schemaVersion || 1;
+  if (db.schemaVersion !== SCHEMA_VERSION) {
+    db.schemaVersion = SCHEMA_VERSION;
+    changed = true;
+  }
   db.profiles = Array.isArray(db.profiles) ? db.profiles : [];
   db.exercises = Array.isArray(db.exercises) ? db.exercises : [];
   db.workouts = Array.isArray(db.workouts) ? db.workouts : [];
+  db.templates = Array.isArray(db.templates) ? db.templates : [];
 
   for (const profile of db.profiles) {
     const previous = JSON.stringify(profile);
@@ -50,6 +55,20 @@ function normalizeDb(db) {
     changed = changed || previous !== JSON.stringify(profile);
   }
 
+  db.workouts = db.workouts.map((workout, index) => {
+    const previous = JSON.stringify(workout);
+    const normalized = normalizeStoredWorkout(workout, index);
+    changed = changed || previous !== JSON.stringify(normalized);
+    return normalized;
+  });
+
+  db.templates = db.templates.map((template, index) => {
+    const previous = JSON.stringify(template);
+    const normalized = normalizeStoredTemplate(template, index);
+    changed = changed || previous !== JSON.stringify(normalized);
+    return normalized;
+  });
+
   return { db, changed };
 }
 
@@ -57,7 +76,7 @@ async function createInitialDb() {
   const rawSeed = JSON.parse(await readFile(SEED_FILE, "utf8"));
   const createdAt = nowIso();
   return {
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     createdAt,
     profiles: [],
     exercises: rawSeed.map((exercise) => ({
@@ -69,7 +88,8 @@ async function createInitialDb() {
       createdAt,
       updatedAt: createdAt
     })),
-    workouts: []
+    workouts: [],
+    templates: []
   };
 }
 
@@ -199,38 +219,42 @@ function workoutsCsv(profile, workouts) {
     "profile_nickname",
     "date",
     "start_time",
-    "end_time",
+    "duration_minutes",
     "energy_score",
+    "block_order",
+    "block_rest_seconds",
     "exercise_order",
     "exercise_name",
     "set_number",
     "reps",
     "weight_lb",
-    "rest_seconds",
     "rir",
     "created_at"
   ];
   const rows = [headers];
 
   for (const workout of workouts) {
-    for (const exercise of workout.exercises) {
-      for (const set of exercise.sets) {
-        rows.push([
-          workout.id,
-          profile.nickname,
-          workout.date,
-          workout.startTime,
-          workout.endTime,
-          workout.energyScore,
-          exercise.order,
-          exercise.nameSnapshot,
-          set.setNumber,
-          set.reps,
-          set.weightLb,
-          set.restSeconds,
-          set.rir,
-          workout.createdAt
-        ]);
+    for (const block of workoutBlocks(workout)) {
+      for (const exercise of block.exercises) {
+        for (const set of exercise.sets) {
+          rows.push([
+            workout.id,
+            profile.nickname,
+            workout.date,
+            workout.startTime,
+            workout.durationMinutes,
+            workout.energyScore,
+            block.order,
+            block.restSeconds,
+            exercise.order,
+            exercise.nameSnapshot,
+            set.setNumber,
+            set.reps,
+            set.weightLb,
+            set.rir,
+            workout.createdAt
+          ]);
+        }
       }
     }
   }
@@ -344,6 +368,201 @@ function timeIndex(value, allowEnd = false) {
   return hour * 2 + (minute === 30 ? 1 : 0);
 }
 
+function safeId(value) {
+  const id = cleanText(value);
+  return id || randomUUID();
+}
+
+function cleanOrder(value, fallback) {
+  const order = Number(value);
+  return Number.isInteger(order) && order > 0 ? order : fallback;
+}
+
+function storedNumber(value, options) {
+  const parsed = parseOptionalNumber(value, options);
+  return parsed === undefined ? null : parsed;
+}
+
+function durationFromTimes(startTime, endTime) {
+  const startIndex = timeIndex(startTime);
+  const endIndex = timeIndex(endTime, true);
+  if (startIndex < 0 || endIndex < 0 || endIndex <= startIndex) return null;
+  return (endIndex - startIndex) * 30;
+}
+
+function normalizeStoredSet(set = {}, setIndex = 0) {
+  return {
+    id: safeId(set.id),
+    setNumber: cleanOrder(set.setNumber, setIndex + 1),
+    reps: storedNumber(set.reps, { min: 0, max: 999, integer: true }),
+    weightLb: storedNumber(set.weightLb, { min: 0, max: 2000 }),
+    rir: storedNumber(set.rir, { min: 0, max: 6, integer: true })
+  };
+}
+
+function firstLegacyRestSeconds(exercise = {}) {
+  const sets = Array.isArray(exercise.sets) ? exercise.sets : [];
+  for (const set of sets) {
+    const restSeconds = storedNumber(set?.restSeconds, { min: 0, max: 3600, integer: true });
+    if (restSeconds !== null) return restSeconds;
+  }
+  return null;
+}
+
+function normalizeStoredExercise(exercise = {}, exerciseIndex = 0) {
+  return {
+    id: safeId(exercise.id),
+    exerciseId: exercise.exerciseId || null,
+    nameSnapshot: cleanText(exercise.nameSnapshot || exercise.name || "Exercise").slice(0, 80),
+    order: cleanOrder(exercise.order, exerciseIndex + 1),
+    sets: (Array.isArray(exercise.sets) ? exercise.sets : [])
+      .map((set, setIndex) => normalizeStoredSet(set, setIndex))
+  };
+}
+
+function normalizeStoredBlock(block = {}, blockIndex = 0) {
+  return {
+    id: safeId(block.id),
+    order: cleanOrder(block.order, blockIndex + 1),
+    restSeconds: storedNumber(block.restSeconds, { min: 0, max: 3600, integer: true }),
+    exercises: (Array.isArray(block.exercises) ? block.exercises : [])
+      .map((exercise, exerciseIndex) => normalizeStoredExercise(exercise, exerciseIndex))
+      .filter((exercise) => exercise.sets.length > 0)
+  };
+}
+
+function workoutBlocks(workout = {}) {
+  if (Array.isArray(workout.blocks)) return workout.blocks;
+  if (!Array.isArray(workout.exercises)) return [];
+  return workout.exercises.map((exercise, exerciseIndex) => ({
+    id: safeId(exercise.id),
+    order: exerciseIndex + 1,
+    restSeconds: firstLegacyRestSeconds(exercise),
+    exercises: [exercise]
+  }));
+}
+
+function normalizeStoredWorkout(workout = {}, workoutIndex = 0) {
+  const durationMinutes = storedNumber(workout.durationMinutes, { min: 1, max: 1440, integer: true })
+    ?? durationFromTimes(workout.startTime, workout.endTime);
+  const normalized = {
+    id: safeId(workout.id),
+    profileId: cleanText(workout.profileId),
+    date: cleanText(workout.date || todayLikeDate(workout.createdAt)),
+    startTime: cleanText(workout.startTime),
+    durationMinutes,
+    energyScore: storedNumber(workout.energyScore, { min: 1, max: 5, integer: true }),
+    blocks: workoutBlocks(workout)
+      .map((block, blockIndex) => normalizeStoredBlock(block, blockIndex))
+      .filter((block) => block.exercises.length > 0),
+    createdAt: cleanText(workout.createdAt || nowIso()),
+    updatedAt: cleanText(workout.updatedAt || workout.createdAt || nowIso())
+  };
+  if (workout.endTime) normalized.endTime = cleanText(workout.endTime);
+  normalized.order = cleanOrder(workout.order, workoutIndex + 1);
+  return normalized;
+}
+
+function todayLikeDate(value) {
+  const text = cleanText(value);
+  return /^\d{4}-\d{2}-\d{2}/.test(text) ? text.slice(0, 10) : nowIso().slice(0, 10);
+}
+
+function normalizeStoredTemplate(template = {}, templateIndex = 0) {
+  const name = cleanText(template.name || `Default workout ${templateIndex + 1}`).slice(0, 50);
+  return {
+    id: safeId(template.id),
+    profileId: cleanText(template.profileId),
+    name,
+    nameKey: cleanText(template.nameKey || name.toLowerCase()),
+    blocks: workoutBlocks(template)
+      .map((block, blockIndex) => normalizeStoredBlock(block, blockIndex))
+      .filter((block) => block.exercises.length > 0),
+    createdAt: cleanText(template.createdAt || nowIso()),
+    updatedAt: cleanText(template.updatedAt || template.createdAt || nowIso())
+  };
+}
+
+function incomingBlocksFromBody(body) {
+  if (Array.isArray(body.blocks)) return body.blocks;
+  if (!Array.isArray(body.exercises)) return [];
+  return body.exercises.map((exercise, exerciseIndex) => ({
+    order: exerciseIndex + 1,
+    restSeconds: firstLegacyRestSeconds(exercise),
+    exercises: [exercise]
+  }));
+}
+
+function normalizeIncomingBlocks(db, body) {
+  const rawBlocks = incomingBlocksFromBody(body);
+  if (rawBlocks.length === 0) {
+    return { ok: false, status: 400, message: "Add at least one exercise before saving." };
+  }
+
+  const blocks = [];
+  rawBlocks.forEach((block, blockIndex) => {
+    const restSeconds = parseOptionalNumber(block.restSeconds, { min: 0, max: 3600, integer: true });
+    if (restSeconds === undefined) {
+      throw Object.assign(new Error("Rest time is outside the allowed range."), { status: 400 });
+    }
+
+    const rawExercises = Array.isArray(block.exercises) ? block.exercises : [];
+    const exercises = [];
+    rawExercises.forEach((exercise, exerciseIndex) => {
+      const baseExercise = db.exercises.find((item) => item.id === exercise.exerciseId);
+      const nameSnapshot = cleanText(exercise.nameSnapshot || baseExercise?.name || "Exercise").slice(0, 80);
+      if (!Array.isArray(exercise.sets) || exercise.sets.length === 0) return;
+
+      const sets = exercise.sets.map((set, setIndex) => {
+        const reps = parseOptionalNumber(set.reps, { min: 0, max: 999, integer: true });
+        const weightLb = parseOptionalNumber(set.weightLb, { min: 0, max: 2000 });
+        const rir = parseOptionalNumber(set.rir, { min: 0, max: 6, integer: true });
+        if ([reps, weightLb, rir].some((value) => value === undefined)) {
+          throw Object.assign(new Error("Set values are outside the allowed range."), { status: 400 });
+        }
+        return {
+          id: randomUUID(),
+          setNumber: setIndex + 1,
+          reps,
+          weightLb,
+          rir
+        };
+      });
+
+      exercises.push({
+        id: randomUUID(),
+        exerciseId: exercise.exerciseId || null,
+        nameSnapshot,
+        order: exerciseIndex + 1,
+        sets
+      });
+    });
+
+    if (exercises.length > 0) {
+      blocks.push({
+        id: randomUUID(),
+        order: blockIndex + 1,
+        restSeconds,
+        exercises
+      });
+    }
+  });
+
+  if (blocks.length === 0) {
+    return { ok: false, status: 400, message: "Add at least one set before saving." };
+  }
+
+  return { ok: true, blocks };
+}
+
+function validateTemplateName(name) {
+  const clean = cleanText(name);
+  if (clean.length < 1 || clean.length > 50) {
+    return { ok: false, message: "Default workout name must be 1 to 50 characters." };
+  }
+  return { ok: true, name: clean, key: clean.toLowerCase() };
+}
+
 function normalizeWorkout(db, body) {
   const profile = findProfile(db, body.profileId);
   if (!profile) return { ok: false, status: 404, message: "Profile was not found." };
@@ -354,11 +573,14 @@ function normalizeWorkout(db, body) {
   }
 
   const startTime = cleanText(body.startTime);
-  const endTime = cleanText(body.endTime);
   const startIndex = timeIndex(startTime);
-  const endIndex = timeIndex(endTime, true);
-  if (startIndex < 0 || endIndex < 0 || endIndex <= startIndex) {
-    return { ok: false, status: 400, message: "Workout time must use 30-minute slots and end after it starts." };
+  if (startIndex < 0) {
+    return { ok: false, status: 400, message: "Workout start time must use 30-minute slots." };
+  }
+
+  const durationMinutes = parseOptionalNumber(body.durationMinutes, { min: 1, max: 1440, integer: true });
+  if (durationMinutes === undefined) {
+    return { ok: false, status: 400, message: "Workout duration must be blank or between 1 minute and 24 hours." };
   }
 
   const energyScore = parseOptionalNumber(body.energyScore, { min: 1, max: 5, integer: true });
@@ -366,46 +588,8 @@ function normalizeWorkout(db, body) {
     return { ok: false, status: 400, message: "Energy score must be between 1 and 5." };
   }
 
-  if (!Array.isArray(body.exercises) || body.exercises.length === 0) {
-    return { ok: false, status: 400, message: "Add at least one exercise before saving." };
-  }
-
-  const exercises = [];
-  body.exercises.forEach((exercise, exerciseIndex) => {
-    const baseExercise = db.exercises.find((item) => item.id === exercise.exerciseId);
-    const nameSnapshot = cleanText(exercise.nameSnapshot || baseExercise?.name || "Exercise").slice(0, 80);
-    if (!Array.isArray(exercise.sets) || exercise.sets.length === 0) return;
-
-    const sets = exercise.sets.map((set, setIndex) => {
-      const reps = parseOptionalNumber(set.reps, { min: 0, max: 999, integer: true });
-      const weightLb = parseOptionalNumber(set.weightLb, { min: 0, max: 2000 });
-      const restSeconds = parseOptionalNumber(set.restSeconds, { min: 0, max: 3600, integer: true });
-      const rir = parseOptionalNumber(set.rir, { min: 0, max: 6, integer: true });
-      if ([reps, weightLb, restSeconds, rir].some((value) => value === undefined)) {
-        throw Object.assign(new Error("Set values are outside the allowed range."), { status: 400 });
-      }
-      return {
-        id: randomUUID(),
-        setNumber: setIndex + 1,
-        reps,
-        weightLb,
-        restSeconds,
-        rir
-      };
-    });
-
-    exercises.push({
-      id: randomUUID(),
-      exerciseId: exercise.exerciseId || null,
-      nameSnapshot,
-      order: exerciseIndex + 1,
-      sets
-    });
-  });
-
-  if (exercises.length === 0) {
-    return { ok: false, status: 400, message: "Add at least one set before saving." };
-  }
+  const blocks = normalizeIncomingBlocks(db, body);
+  if (!blocks.ok) return blocks;
 
   return {
     ok: true,
@@ -414,9 +598,33 @@ function normalizeWorkout(db, body) {
       profileId: profile.id,
       date,
       startTime,
-      endTime,
+      durationMinutes,
       energyScore,
-      exercises,
+      blocks: blocks.blocks,
+      createdAt: nowIso(),
+      updatedAt: nowIso()
+    }
+  };
+}
+
+function normalizeTemplate(db, body) {
+  const profile = findProfile(db, body.profileId);
+  if (!profile) return { ok: false, status: 404, message: "Profile was not found." };
+
+  const name = validateTemplateName(body.name);
+  if (!name.ok) return { ok: false, status: 400, message: name.message };
+
+  const blocks = normalizeIncomingBlocks(db, body);
+  if (!blocks.ok) return blocks;
+
+  return {
+    ok: true,
+    template: {
+      id: randomUUID(),
+      profileId: profile.id,
+      name: name.name,
+      nameKey: name.key,
+      blocks: blocks.blocks,
       createdAt: nowIso(),
       updatedAt: nowIso()
     }
@@ -556,6 +764,44 @@ async function handleApi(req, res, url) {
       return mergedExerciseForProfile(profile, baseExercise);
     });
     return sendJson(res, 200, { exercise });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/templates") {
+    const db = await readDb();
+    const profile = findProfile(db, url.searchParams.get("profileId"));
+    if (!profile) return sendError(res, 404, "Profile was not found.");
+    const templates = db.templates
+      .filter((template) => template.profileId === profile.id)
+      .sort((a, b) => a.name.localeCompare(b.name));
+    return sendJson(res, 200, { templates });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/templates") {
+    const body = await parseBody(req);
+    const normalized = normalizeTemplate(await readDb(), body);
+    if (!normalized.ok) return sendError(res, normalized.status, normalized.message);
+    const template = await withDb(async (db) => {
+      const fresh = normalizeTemplate(db, body);
+      if (!fresh.ok) throw Object.assign(new Error(fresh.message), { status: fresh.status });
+      if (db.templates.some((item) => item.profileId === fresh.template.profileId && item.nameKey === fresh.template.nameKey)) {
+        throw Object.assign(new Error("That default workout name already exists."), { status: 409 });
+      }
+      db.templates.push(fresh.template);
+      return fresh.template;
+    });
+    return sendJson(res, 201, { template });
+  }
+
+  const templateMatch = url.pathname.match(/^\/api\/templates\/([^/]+)$/);
+  if (req.method === "DELETE" && templateMatch) {
+    const profileId = url.searchParams.get("profileId");
+    const result = await withDb(async (db) => {
+      const index = db.templates.findIndex((template) => template.id === templateMatch[1] && template.profileId === profileId);
+      if (index < 0) throw Object.assign(new Error("Default workout was not found."), { status: 404 });
+      db.templates.splice(index, 1);
+      return { ok: true };
+    });
+    return sendJson(res, 200, result);
   }
 
   if (req.method === "GET" && url.pathname === "/api/workouts") {

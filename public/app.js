@@ -9,9 +9,12 @@ const state = {
   view: "log",
   exercises: [],
   workouts: [],
+  templates: [],
   exerciseSearch: "",
   exerciseManagerSearch: "",
   editingExerciseId: "",
+  addToBlockId: "",
+  templateName: "",
   draft: null
 };
 
@@ -58,14 +61,14 @@ function nextSlot(value) {
   return endSlots[Math.min(index + 1, endSlots.length - 1)] || "09:30";
 }
 
-function newDraft() {
-  const startTime = defaultStartTime();
+function newDraft(template = null) {
   return {
     date: today(),
-    startTime,
-    endTime: nextSlot(startTime),
+    startTime: defaultStartTime(),
+    durationHours: "",
+    durationMinutePart: "",
     energyScore: 3,
-    exercises: []
+    blocks: template ? template.blocks.map(draftBlockFromSaved) : []
   };
 }
 
@@ -139,12 +142,14 @@ async function loadBootstrap() {
 
 async function loadProfileData() {
   if (!state.profile) return;
-  const [exercisePayload, workoutPayload] = await Promise.all([
+  const [exercisePayload, workoutPayload, templatePayload] = await Promise.all([
     api(`/api/exercises?profileId=${encodeURIComponent(state.profile.id)}&includeHidden=true`),
-    api(`/api/workouts?profileId=${encodeURIComponent(state.profile.id)}`)
+    api(`/api/workouts?profileId=${encodeURIComponent(state.profile.id)}`),
+    api(`/api/templates?profileId=${encodeURIComponent(state.profile.id)}`)
   ]);
   state.exercises = exercisePayload.exercises;
   state.workouts = workoutPayload.workouts;
+  state.templates = templatePayload.templates;
 }
 
 async function selectProfile(profileId) {
@@ -165,6 +170,9 @@ function switchProfile() {
   state.draft = null;
   state.exercises = [];
   state.workouts = [];
+  state.templates = [];
+  state.addToBlockId = "";
+  state.templateName = "";
   state.error = "";
   state.notice = "";
   localStorage.removeItem(STORAGE_KEY);
@@ -293,10 +301,14 @@ function renderView() {
 function renderLogView() {
   const settings = activeSettings();
   const draft = state.draft || newDraft();
-  const addedExerciseIds = new Set(draft.exercises.map((exercise) => exercise.exerciseId));
-  const matches = exerciseMatches(state.exerciseSearch).filter((exercise) => !addedExerciseIds.has(exercise.id)).slice(0, 8);
+  const targetBlock = findDraftBlock(state.addToBlockId);
+  const targetExerciseIds = new Set((targetBlock?.exercises || []).map((exercise) => exercise.exerciseId));
+  const matches = exerciseMatches(state.exerciseSearch)
+    .filter((exercise) => !targetBlock || !targetExerciseIds.has(exercise.id))
+    .slice(0, 8);
 
   return `
+    ${renderTemplatePanel()}
     <div class="desktop-columns">
       <section class="panel">
         <h2>Session</h2>
@@ -304,14 +316,18 @@ function renderLogView() {
           <label for="workout-date">Day</label>
           <input id="workout-date" type="date" value="${escapeHtml(draft.date)}" data-draft-field="date">
         </div>
-        <div class="form-grid">
+        <div class="form-grid session-grid">
           <div class="form-row">
             <label for="start-time">Start</label>
             <select id="start-time" data-draft-field="startTime">${timeOptions(draft.startTime)}</select>
           </div>
           <div class="form-row">
-            <label for="end-time">End</label>
-            <select id="end-time" data-draft-field="endTime">${timeOptions(draft.endTime, { includeEnd: true })}</select>
+            <label for="duration-hours">Hours</label>
+            <input id="duration-hours" type="number" min="0" max="24" inputmode="numeric" value="${escapeHtml(draft.durationHours)}" data-draft-field="durationHours" placeholder="Blank">
+          </div>
+          <div class="form-row">
+            <label for="duration-minutes">Minutes</label>
+            <input id="duration-minutes" type="number" min="0" max="59" inputmode="numeric" value="${escapeHtml(draft.durationMinutePart)}" data-draft-field="durationMinutePart" placeholder="Blank">
           </div>
         </div>
         ${settings.showEnergy ? `
@@ -325,7 +341,8 @@ function renderLogView() {
       </section>
 
       <section class="panel">
-        <h2>Add exercise</h2>
+        <h2>${targetBlock ? "Add to block" : "Add exercise"}</h2>
+        ${targetBlock ? `<div class="target-banner"><span>Adding to block ${draft.blocks.indexOf(targetBlock) + 1}</span><button class="btn secondary" type="button" data-action="cancel-block-target">Cancel</button></div>` : ""}
         <div class="exercise-search-wrap">
           <input type="search" placeholder="Search exercise, muscle, equipment" value="${escapeHtml(state.exerciseSearch)}" data-search="log-exercise">
           <div class="search-results" id="exerciseMatches">
@@ -339,19 +356,48 @@ function renderLogView() {
     <section>
       <div class="exercise-header">
         <div>
-          <h2>Workout sets</h2>
-          <p class="muted">${draft.exercises.length === 0 ? "Add an exercise to start tracking sets." : "Each row is one performed set."}</p>
+          <h2>Workout blocks</h2>
+          <p class="muted">${draft.blocks.length === 0 ? "Add an exercise to start tracking sets." : "A block can be one exercise or a circuit."}</p>
         </div>
       </div>
       <div class="selected-list">
-        ${draft.exercises.length === 0 ? `<div class="empty-state">Your workout is empty.</div>` : ""}
-        ${draft.exercises.map((exercise) => renderSelectedExercise(exercise, settings)).join("")}
+        ${draft.blocks.length === 0 ? `<div class="empty-state">Your workout is empty.</div>` : ""}
+        ${draft.blocks.map((block, index) => renderSelectedBlock(block, index, settings)).join("")}
       </div>
     </section>
 
     <div class="save-bar">
-      <button class="btn" type="button" data-action="save-workout" ${draft.exercises.length === 0 ? "disabled" : ""}>Save workout</button>
+      <button class="btn" type="button" data-action="save-workout" ${draft.blocks.length === 0 ? "disabled" : ""}>Save workout</button>
+      <form class="template-save-form" data-form="save-template">
+        <input name="name" maxlength="50" value="${escapeHtml(state.templateName)}" data-template-name placeholder="Default workout name">
+        <button class="btn secondary" type="submit" ${draft.blocks.length === 0 ? "disabled" : ""}>Save as default</button>
+      </form>
     </div>
+  `;
+}
+
+function renderTemplatePanel() {
+  return `
+    <section class="panel">
+      <div class="section-title-row">
+        <div>
+          <h2>Default workouts</h2>
+          <p class="muted">${state.templates.length === 0 ? "Save a workout as a default to start faster next time." : "Load a saved workout setup into today's draft."}</p>
+        </div>
+      </div>
+      <div class="template-list">
+        ${state.templates.length === 0 ? `<div class="empty-state">No default workouts yet.</div>` : ""}
+        ${state.templates.map((template) => `
+          <article class="template-card">
+            <button class="template-load" type="button" data-action="load-template" data-template-id="${template.id}">
+              <strong>${escapeHtml(template.name)}</strong>
+              <span>${template.blocks.length} ${template.blocks.length === 1 ? "block" : "blocks"}</span>
+            </button>
+            <button class="icon-btn" type="button" data-action="delete-template" data-template-id="${template.id}" title="Delete default workout">X</button>
+          </article>
+        `).join("")}
+      </div>
+    </section>
   `;
 }
 
@@ -371,52 +417,74 @@ function renderExerciseSearchResult(exercise) {
 }
 
 function setGridClass(settings) {
-  if (!settings.showRest && !settings.showRir) return "compact";
-  if (!settings.showRest) return "no-rest";
   if (!settings.showRir) return "no-rir";
   return "";
 }
 
-function renderSelectedExercise(exercise, settings) {
-  const gridClass = setGridClass(settings);
+function renderSelectedBlock(block, blockIndex, settings) {
+  const exerciseCount = block.exercises.length;
+  const setCount = block.exercises.reduce((total, exercise) => total + exercise.sets.length, 0);
+  const title = exerciseCount === 1 ? "Exercise" : "Circuit";
   return `
-    <section class="exercise-card">
+    <section class="exercise-card block-card ${state.addToBlockId === block.draftId ? "targeted" : ""}">
       <header class="exercise-header">
         <div class="exercise-title">
-          <h3>${escapeHtml(exercise.nameSnapshot)}</h3>
-          <div class="meta-line">${exercise.sets.length} ${exercise.sets.length === 1 ? "set" : "sets"}</div>
+          <h3>${title} ${blockIndex + 1}</h3>
+          <div class="meta-line">${exerciseCount} ${exerciseCount === 1 ? "exercise" : "exercises"} - ${setCount} ${setCount === 1 ? "set" : "sets"}</div>
         </div>
-        <button class="icon-btn" type="button" data-action="remove-exercise-from-draft" data-draft-exercise-id="${exercise.draftId}" title="Remove exercise">X</button>
+        <button class="icon-btn" type="button" data-action="remove-block" data-draft-block-id="${block.draftId}" title="Remove block">X</button>
       </header>
-      <div class="set-grid">
-        <div class="set-head ${gridClass}">
-          <span>Set</span>
-          <span>Reps</span>
-          <span>Lb</span>
-          ${settings.showRest ? "<span>Rest</span>" : ""}
-          ${settings.showRir ? "<span>RIR</span>" : ""}
-          <span></span>
+      ${settings.showRest ? `
+        <div class="form-row block-rest-row">
+          <label for="rest-${block.draftId}">Rest for block (seconds)</label>
+          <input id="rest-${block.draftId}" type="number" min="0" max="3600" inputmode="numeric" value="${escapeHtml(block.restSeconds)}" data-block-field="restSeconds" data-draft-block-id="${block.draftId}" placeholder="Optional">
         </div>
-        ${exercise.sets.map((set, index) => renderSetRow(exercise, set, index, settings)).join("")}
+      ` : ""}
+      <div class="block-exercise-list">
+        ${block.exercises.map((exercise) => renderBlockExercise(block, exercise, settings)).join("")}
       </div>
       <div class="button-row" style="margin-top: 10px;">
-        <button class="btn secondary" type="button" data-action="add-set" data-draft-exercise-id="${exercise.draftId}">Add set</button>
-        <button class="btn secondary" type="button" data-action="copy-set" data-draft-exercise-id="${exercise.draftId}">Copy last</button>
+        <button class="btn secondary" type="button" data-action="target-block" data-draft-block-id="${block.draftId}">Add exercise to block</button>
       </div>
     </section>
   `;
 }
 
-function renderSetRow(exercise, set, index, settings) {
+function renderBlockExercise(block, exercise, settings) {
+  const gridClass = setGridClass(settings);
+  return `
+    <div class="block-exercise">
+      <div class="block-exercise-header">
+        <strong>${escapeHtml(exercise.nameSnapshot)}</strong>
+        <button class="icon-btn" type="button" data-action="remove-exercise-from-block" data-draft-block-id="${block.draftId}" data-draft-exercise-id="${exercise.draftId}" title="Remove exercise">X</button>
+      </div>
+      <div class="set-grid">
+        <div class="set-head ${gridClass}">
+          <span>Set</span>
+          <span>Reps</span>
+          <span>Lb</span>
+          ${settings.showRir ? "<span>RIR</span>" : ""}
+          <span></span>
+        </div>
+        ${exercise.sets.map((set, index) => renderSetRow(block, exercise, set, index, settings)).join("")}
+      </div>
+      <div class="button-row" style="margin-top: 10px;">
+        <button class="btn secondary" type="button" data-action="add-set" data-draft-block-id="${block.draftId}" data-draft-exercise-id="${exercise.draftId}">Add set</button>
+        <button class="btn secondary" type="button" data-action="copy-set" data-draft-block-id="${block.draftId}" data-draft-exercise-id="${exercise.draftId}">Copy last</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderSetRow(block, exercise, set, index, settings) {
   const gridClass = setGridClass(settings);
   return `
     <div class="set-row ${gridClass}">
       <div class="set-number">${index + 1}</div>
-      <input type="number" min="0" max="999" inputmode="numeric" value="${escapeHtml(set.reps)}" data-set-field="reps" data-draft-exercise-id="${exercise.draftId}" data-set-id="${set.draftId}" aria-label="Reps">
-      <input type="number" min="0" max="2000" step="0.5" inputmode="decimal" value="${escapeHtml(set.weightLb)}" data-set-field="weightLb" data-draft-exercise-id="${exercise.draftId}" data-set-id="${set.draftId}" aria-label="Weight in pounds">
-      ${settings.showRest ? `<input type="number" min="0" max="3600" inputmode="numeric" value="${escapeHtml(set.restSeconds)}" data-set-field="restSeconds" data-draft-exercise-id="${exercise.draftId}" data-set-id="${set.draftId}" aria-label="Rest seconds">` : ""}
-      ${settings.showRir ? `<select data-set-field="rir" data-draft-exercise-id="${exercise.draftId}" data-set-id="${set.draftId}" aria-label="RIR">${rirOptions(set.rir)}</select>` : ""}
-      <button class="icon-btn" type="button" data-action="remove-set" data-draft-exercise-id="${exercise.draftId}" data-set-id="${set.draftId}" title="Remove set">X</button>
+      <input type="number" min="0" max="999" inputmode="numeric" value="${escapeHtml(set.reps)}" data-set-field="reps" data-draft-block-id="${block.draftId}" data-draft-exercise-id="${exercise.draftId}" data-set-id="${set.draftId}" aria-label="Reps">
+      <input type="number" min="0" max="2000" step="0.5" inputmode="decimal" value="${escapeHtml(set.weightLb)}" data-set-field="weightLb" data-draft-block-id="${block.draftId}" data-draft-exercise-id="${exercise.draftId}" data-set-id="${set.draftId}" aria-label="Weight in pounds">
+      ${settings.showRir ? `<select data-set-field="rir" data-draft-block-id="${block.draftId}" data-draft-exercise-id="${exercise.draftId}" data-set-id="${set.draftId}" aria-label="RIR">${rirOptions(set.rir)}</select>` : ""}
+      <button class="icon-btn" type="button" data-action="remove-set" data-draft-block-id="${block.draftId}" data-draft-exercise-id="${exercise.draftId}" data-set-id="${set.draftId}" title="Remove set">X</button>
     </div>
   `;
 }
@@ -425,11 +493,13 @@ function workoutStats(workouts = state.workouts) {
   let setCount = 0;
   let volume = 0;
   for (const workout of workouts) {
-    for (const exercise of workout.exercises) {
-      for (const set of exercise.sets) {
-        setCount += 1;
-        if (Number.isFinite(set.reps) && Number.isFinite(set.weightLb)) {
-          volume += set.reps * set.weightLb;
+    for (const block of workoutBlocks(workout)) {
+      for (const exercise of block.exercises) {
+        for (const set of exercise.sets) {
+          setCount += 1;
+          if (Number.isFinite(set.reps) && Number.isFinite(set.weightLb)) {
+            volume += set.reps * set.weightLb;
+          }
         }
       }
     }
@@ -456,14 +526,18 @@ function renderHistoryView() {
 }
 
 function renderWorkoutCard(workout) {
-  const setCount = workout.exercises.reduce((total, exercise) => total + exercise.sets.length, 0);
+  const blocks = workoutBlocks(workout);
+  const exerciseCount = blocks.reduce((total, block) => total + block.exercises.length, 0);
+  const setCount = blocks.reduce((total, block) => total + block.exercises.reduce((exerciseTotal, exercise) => exerciseTotal + exercise.sets.length, 0), 0);
+  const duration = workoutDurationText(workout);
   return `
     <article class="workout-card">
       <header class="workout-header">
         <div>
-          <h3>${escapeHtml(workout.date)} · ${displayTime(workout.startTime)} -> ${displayTime(workout.endTime)}</h3>
+          <h3>${escapeHtml(workout.date)} - ${displayTime(workout.startTime)}${duration ? ` - ${escapeHtml(duration)}` : ""}</h3>
           <div class="meta-line">
-            <span>${workout.exercises.length} exercises</span>
+            <span>${blocks.length} ${blocks.length === 1 ? "block" : "blocks"}</span>
+            <span>${exerciseCount} exercises</span>
             <span>${setCount} sets</span>
             ${workout.energyScore ? `<span>Energy ${workout.energyScore}/5</span>` : ""}
           </div>
@@ -473,10 +547,50 @@ function renderWorkoutCard(workout) {
       <details>
         <summary>Details</summary>
         <div class="details-list">
-          ${workout.exercises.map(renderHistoryExercise).join("")}
+          ${blocks.map(renderHistoryBlock).join("")}
         </div>
       </details>
     </article>
+  `;
+}
+
+function workoutBlocks(workout) {
+  if (Array.isArray(workout.blocks)) return workout.blocks;
+  if (!Array.isArray(workout.exercises)) return [];
+  return workout.exercises.map((exercise, index) => ({
+    id: exercise.id || `${workout.id}-legacy-${index}`,
+    order: index + 1,
+    restSeconds: firstSetRest(exercise),
+    exercises: [exercise]
+  }));
+}
+
+function firstSetRest(exercise) {
+  const set = (exercise.sets || []).find((item) => item.restSeconds !== null && item.restSeconds !== undefined && item.restSeconds !== "");
+  return set ? set.restSeconds : null;
+}
+
+function workoutDurationText(workout) {
+  if (Number.isFinite(workout.durationMinutes)) {
+    const hours = Math.floor(workout.durationMinutes / 60);
+    const minutes = workout.durationMinutes % 60;
+    if (hours && minutes) return `${hours}h ${minutes}m`;
+    if (hours) return `${hours}h`;
+    return `${minutes} min`;
+  }
+  if (workout.endTime) return `${displayTime(workout.startTime)} -> ${displayTime(workout.endTime)}`;
+  return "";
+}
+
+function renderHistoryBlock(block) {
+  return `
+    <div class="history-block">
+      <div class="meta-line">
+        <strong>Block ${block.order}</strong>
+        ${block.restSeconds === null || block.restSeconds === undefined ? "" : `<span>${block.restSeconds}s rest</span>`}
+      </div>
+      ${block.exercises.map(renderHistoryExercise).join("")}
+    </div>
   `;
 }
 
@@ -489,10 +603,9 @@ function renderHistoryExercise(exercise) {
           `Set ${set.setNumber}`,
           set.reps === null ? null : `${set.reps} reps`,
           set.weightLb === null ? null : `${set.weightLb} lb`,
-          set.restSeconds === null ? null : `${set.restSeconds}s rest`,
           set.rir === null ? null : `RIR ${set.rir}`
         ].filter(Boolean);
-        return `<div class="history-set">${escapeHtml(parts.join(" · "))}</div>`;
+        return `<div class="history-set">${escapeHtml(parts.join(" - "))}</div>`;
       }).join("")}
     </div>
   `;
@@ -602,7 +715,7 @@ function renderSettingsView() {
         <label class="toggle">
           <span>
             <strong>Rest time</strong>
-            <span class="muted">Show seconds between sets.</span>
+            <span class="muted">Show seconds between workout blocks.</span>
           </span>
           <input type="checkbox" data-setting="showRest" ${settings.showRest ? "checked" : ""}>
         </label>
@@ -629,8 +742,12 @@ function render() {
   app.innerHTML = state.profile ? renderShell() : renderProfileGate();
 }
 
-function findDraftExercise(draftExerciseId) {
-  return state.draft?.exercises.find((exercise) => exercise.draftId === draftExerciseId);
+function findDraftBlock(draftBlockId) {
+  return state.draft?.blocks.find((block) => block.draftId === draftBlockId);
+}
+
+function findDraftExercise(draftBlockId, draftExerciseId) {
+  return findDraftBlock(draftBlockId)?.exercises.find((exercise) => exercise.draftId === draftExerciseId);
 }
 
 function findDraftSet(exercise, setId) {
@@ -642,39 +759,110 @@ function blankSet(seed = {}) {
     draftId: draftId(),
     reps: seed.reps ?? "",
     weightLb: seed.weightLb ?? "",
-    restSeconds: seed.restSeconds ?? "",
     rir: seed.rir ?? ""
   };
 }
 
+function draftExerciseFromSaved(exercise) {
+  return {
+    draftId: draftId(),
+    exerciseId: exercise.exerciseId,
+    nameSnapshot: exercise.nameSnapshot,
+    sets: (exercise.sets || []).map(blankSet)
+  };
+}
+
+function draftBlockFromSaved(block) {
+  return {
+    draftId: draftId(),
+    restSeconds: block.restSeconds ?? "",
+    exercises: (block.exercises || []).map(draftExerciseFromSaved)
+  };
+}
+
+function draftExerciseFromCatalog(exercise) {
+  return {
+    draftId: draftId(),
+    exerciseId: exercise.id,
+    nameSnapshot: exercise.name,
+    sets: [blankSet()]
+  };
+}
+
+function draftDurationMinutes(draft) {
+  const hoursBlank = draft.durationHours === "" || draft.durationHours === null || draft.durationHours === undefined;
+  const minutesBlank = draft.durationMinutePart === "" || draft.durationMinutePart === null || draft.durationMinutePart === undefined;
+  if (hoursBlank && minutesBlank) return null;
+  const hours = Number(draft.durationHours || 0);
+  const minutes = Number(draft.durationMinutePart || 0);
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return undefined;
+  const total = hours * 60 + minutes;
+  return total > 0 ? total : null;
+}
+
+function draftBlocksPayload(draft, settings) {
+  return draft.blocks.map((block) => ({
+    restSeconds: settings.showRest ? block.restSeconds : null,
+    exercises: block.exercises.map((exercise) => ({
+      exerciseId: exercise.exerciseId,
+      nameSnapshot: exercise.nameSnapshot,
+      sets: exercise.sets.map((set) => ({
+        reps: set.reps,
+        weightLb: set.weightLb,
+        rir: settings.showRir ? set.rir : null
+      }))
+    }))
+  }));
+}
+
 async function saveWorkout() {
   const draft = state.draft;
-  if (!draft || draft.exercises.length === 0) return;
+  if (!draft || draft.blocks.length === 0) return;
 
   try {
+    const durationMinutes = draftDurationMinutes(draft);
+    if (durationMinutes === undefined) {
+      setError("Duration must use numbers only.");
+      return;
+    }
+    const settings = activeSettings();
     const body = {
       profileId: state.profile.id,
       date: draft.date,
       startTime: draft.startTime,
-      endTime: draft.endTime,
-      energyScore: activeSettings().showEnergy ? draft.energyScore : null,
-      exercises: draft.exercises.map((exercise) => ({
-        exerciseId: exercise.exerciseId,
-        nameSnapshot: exercise.nameSnapshot,
-        sets: exercise.sets.map((set) => ({
-          reps: set.reps,
-          weightLb: set.weightLb,
-          restSeconds: activeSettings().showRest ? set.restSeconds : null,
-          rir: activeSettings().showRir ? set.rir : null
-        }))
-      }))
+      durationMinutes,
+      energyScore: settings.showEnergy ? draft.energyScore : null,
+      blocks: draftBlocksPayload(draft, settings)
     };
     await api("/api/workouts", { method: "POST", body });
     state.draft = newDraft();
     state.exerciseSearch = "";
+    state.addToBlockId = "";
     await loadProfileData();
     state.view = "history";
     setNotice("Workout saved.");
+  } catch (error) {
+    setError(error.message);
+  }
+}
+
+async function saveTemplate(name) {
+  const draft = state.draft;
+  if (!draft || draft.blocks.length === 0) return;
+
+  try {
+    const settings = activeSettings();
+    await api("/api/templates", {
+      method: "POST",
+      body: {
+        profileId: state.profile.id,
+        name,
+        blocks: draftBlocksPayload(draft, settings)
+      }
+    });
+    state.templateName = "";
+    await loadProfileData();
+    setNotice("Default workout saved.");
   } catch (error) {
     setError(error.message);
   }
@@ -723,6 +911,12 @@ document.addEventListener("submit", async (event) => {
       state.editingExerciseId = "";
       await loadProfileData();
       setNotice("Exercise updated.");
+      return;
+    }
+
+    if (formType === "save-template") {
+      state.templateName = data.name || "";
+      await saveTemplate(state.templateName);
     }
   } catch (error) {
     setError(error.message);
@@ -763,32 +957,65 @@ document.addEventListener("click", async (event) => {
     if (action === "add-exercise-to-draft") {
       const exercise = state.exercises.find((item) => item.id === button.dataset.exerciseId);
       if (!exercise) return;
-      state.draft.exercises.push({
-        draftId: draftId(),
-        exerciseId: exercise.id,
-        nameSnapshot: exercise.name,
-        sets: [blankSet()]
-      });
+      const targetBlock = findDraftBlock(state.addToBlockId);
+      if (targetBlock) {
+        if (!targetBlock.exercises.some((item) => item.exerciseId === exercise.id)) {
+          targetBlock.exercises.push(draftExerciseFromCatalog(exercise));
+        }
+      } else {
+        state.draft.blocks.push({
+          draftId: draftId(),
+          restSeconds: "",
+          exercises: [draftExerciseFromCatalog(exercise)]
+        });
+      }
       state.exerciseSearch = "";
       render();
       return;
     }
 
-    if (action === "remove-exercise-from-draft") {
-      state.draft.exercises = state.draft.exercises.filter((exercise) => exercise.draftId !== button.dataset.draftExerciseId);
+    if (action === "target-block") {
+      state.addToBlockId = button.dataset.draftBlockId;
+      state.exerciseSearch = "";
+      render();
+      return;
+    }
+
+    if (action === "cancel-block-target") {
+      state.addToBlockId = "";
+      state.exerciseSearch = "";
+      render();
+      return;
+    }
+
+    if (action === "remove-block") {
+      state.draft.blocks = state.draft.blocks.filter((block) => block.draftId !== button.dataset.draftBlockId);
+      if (state.addToBlockId === button.dataset.draftBlockId) state.addToBlockId = "";
+      render();
+      return;
+    }
+
+    if (action === "remove-exercise-from-block") {
+      const block = findDraftBlock(button.dataset.draftBlockId);
+      if (!block) return;
+      block.exercises = block.exercises.filter((exercise) => exercise.draftId !== button.dataset.draftExerciseId);
+      if (block.exercises.length === 0) {
+        state.draft.blocks = state.draft.blocks.filter((item) => item.draftId !== block.draftId);
+        if (state.addToBlockId === block.draftId) state.addToBlockId = "";
+      }
       render();
       return;
     }
 
     if (action === "add-set") {
-      const exercise = findDraftExercise(button.dataset.draftExerciseId);
+      const exercise = findDraftExercise(button.dataset.draftBlockId, button.dataset.draftExerciseId);
       exercise?.sets.push(blankSet());
       render();
       return;
     }
 
     if (action === "copy-set") {
-      const exercise = findDraftExercise(button.dataset.draftExerciseId);
+      const exercise = findDraftExercise(button.dataset.draftBlockId, button.dataset.draftExerciseId);
       const last = exercise?.sets.at(-1);
       if (exercise && last) exercise.sets.push(blankSet(last));
       render();
@@ -796,7 +1023,7 @@ document.addEventListener("click", async (event) => {
     }
 
     if (action === "remove-set") {
-      const exercise = findDraftExercise(button.dataset.draftExerciseId);
+      const exercise = findDraftExercise(button.dataset.draftBlockId, button.dataset.draftExerciseId);
       if (!exercise) return;
       exercise.sets = exercise.sets.filter((set) => set.draftId !== button.dataset.setId);
       if (exercise.sets.length === 0) exercise.sets.push(blankSet());
@@ -813,6 +1040,24 @@ document.addEventListener("click", async (event) => {
       await api(`/api/workouts/${encodeURIComponent(button.dataset.workoutId)}?profileId=${encodeURIComponent(state.profile.id)}`, { method: "DELETE" });
       await loadProfileData();
       setNotice("Workout deleted.");
+      return;
+    }
+
+    if (action === "load-template") {
+      const template = state.templates.find((item) => item.id === button.dataset.templateId);
+      if (!template) return;
+      state.draft = newDraft(template);
+      state.exerciseSearch = "";
+      state.addToBlockId = "";
+      state.view = "log";
+      setNotice("Default workout loaded.");
+      return;
+    }
+
+    if (action === "delete-template") {
+      await api(`/api/templates/${encodeURIComponent(button.dataset.templateId)}?profileId=${encodeURIComponent(state.profile.id)}`, { method: "DELETE" });
+      await loadProfileData();
+      setNotice("Default workout deleted.");
       return;
     }
 
@@ -849,8 +1094,11 @@ document.addEventListener("input", (event) => {
   if (input.dataset.search === "log-exercise") {
     state.exerciseSearch = input.value;
     const matchesNode = document.querySelector("#exerciseMatches");
-    const addedExerciseIds = new Set(state.draft.exercises.map((exercise) => exercise.exerciseId));
-    const matches = exerciseMatches(state.exerciseSearch).filter((exercise) => !addedExerciseIds.has(exercise.id)).slice(0, 8);
+    const targetBlock = findDraftBlock(state.addToBlockId);
+    const targetExerciseIds = new Set((targetBlock?.exercises || []).map((exercise) => exercise.exerciseId));
+    const matches = exerciseMatches(state.exerciseSearch)
+      .filter((exercise) => !targetBlock || !targetExerciseIds.has(exercise.id))
+      .slice(0, 8);
     if (matchesNode) {
       matchesNode.innerHTML = matches.length === 0
         ? `<div class="empty-state">No visible exercises match that search.</div>`
@@ -867,8 +1115,17 @@ document.addEventListener("input", (event) => {
     state.draft[input.dataset.draftField] = input.value;
   }
 
+  if (input.dataset.templateName !== undefined) {
+    state.templateName = input.value;
+  }
+
+  if (input.dataset.blockField) {
+    const block = findDraftBlock(input.dataset.draftBlockId);
+    if (block) block[input.dataset.blockField] = input.value;
+  }
+
   if (input.dataset.setField) {
-    const exercise = findDraftExercise(input.dataset.draftExerciseId);
+    const exercise = findDraftExercise(input.dataset.draftBlockId, input.dataset.draftExerciseId);
     const set = findDraftSet(exercise, input.dataset.setId);
     if (set) set[input.dataset.setField] = input.value;
   }
@@ -879,14 +1136,15 @@ document.addEventListener("change", async (event) => {
 
   if (input.dataset.draftField) {
     state.draft[input.dataset.draftField] = input.value;
-    if (input.dataset.draftField === "startTime" && timeSlots({ includeEnd: true }).indexOf(state.draft.endTime) <= timeSlots().indexOf(input.value)) {
-      state.draft.endTime = nextSlot(input.value);
-      render();
-    }
+  }
+
+  if (input.dataset.blockField) {
+    const block = findDraftBlock(input.dataset.draftBlockId);
+    if (block) block[input.dataset.blockField] = input.value;
   }
 
   if (input.dataset.setField) {
-    const exercise = findDraftExercise(input.dataset.draftExerciseId);
+    const exercise = findDraftExercise(input.dataset.draftBlockId, input.dataset.draftExerciseId);
     const set = findDraftSet(exercise, input.dataset.setId);
     if (set) set[input.dataset.setField] = input.value;
   }
