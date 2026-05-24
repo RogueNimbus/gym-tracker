@@ -302,6 +302,7 @@ function renderLogView() {
   const settings = activeSettings();
   const draft = state.draft || newDraft();
   const targetBlock = findDraftBlock(state.addToBlockId);
+  const targetBlockNumber = targetBlock ? draft.blocks.indexOf(targetBlock) + 1 : 0;
   const targetExerciseIds = new Set((targetBlock?.exercises || []).map((exercise) => exercise.exerciseId));
   const matches = exerciseMatches(state.exerciseSearch)
     .filter((exercise) => !targetBlock || !targetExerciseIds.has(exercise.id))
@@ -341,13 +342,19 @@ function renderLogView() {
       </section>
 
       <section class="panel">
-        <h2>${targetBlock ? "Add to block" : "Add exercise"}</h2>
-        ${targetBlock ? `<div class="target-banner"><span>Adding to block ${draft.blocks.indexOf(targetBlock) + 1}</span><button class="btn secondary" type="button" data-action="cancel-block-target">Cancel</button></div>` : ""}
+        <div class="section-title-row">
+          <div>
+            <h2>${targetBlock ? `Add to card ${targetBlockNumber}` : "Add new card"}</h2>
+            <p class="muted">${targetBlock ? "Search picks will join this card." : "Search picks will start their own card."}</p>
+          </div>
+          ${!targetBlock && draft.blocks.length > 0 ? `<button class="btn secondary" type="button" data-action="start-new-block">New card</button>` : ""}
+        </div>
+        ${targetBlock ? `<div class="target-banner"><span>Adding exercises to card ${targetBlockNumber}</span><button class="btn secondary" type="button" data-action="start-new-block">Add new card instead</button></div>` : ""}
         <div class="exercise-search-wrap">
           <input type="search" placeholder="Search exercise, muscle, equipment" value="${escapeHtml(state.exerciseSearch)}" data-search="log-exercise">
           <div class="search-results" id="exerciseMatches">
             ${matches.length === 0 ? `<div class="empty-state">No visible exercises match that search.</div>` : ""}
-            ${matches.map(renderExerciseSearchResult).join("")}
+            ${matches.map((exercise) => renderExerciseSearchResult(exercise, Boolean(targetBlock))).join("")}
           </div>
         </div>
       </section>
@@ -356,9 +363,10 @@ function renderLogView() {
     <section>
       <div class="exercise-header">
         <div>
-          <h2>Workout blocks</h2>
-          <p class="muted">${draft.blocks.length === 0 ? "Add an exercise to start tracking sets." : "A block can be one exercise or a circuit."}</p>
+          <h2>Workout cards</h2>
+          <p class="muted">${draft.blocks.length === 0 ? "Add an exercise to start tracking sets." : "Each card can be one exercise or a circuit."}</p>
         </div>
+        <button class="btn secondary" type="button" data-action="start-new-block">Add new card</button>
       </div>
       <div class="selected-list">
         ${draft.blocks.length === 0 ? `<div class="empty-state">Your workout is empty.</div>` : ""}
@@ -391,7 +399,7 @@ function renderTemplatePanel() {
           <article class="template-card">
             <button class="template-load" type="button" data-action="load-template" data-template-id="${template.id}">
               <strong>${escapeHtml(template.name)}</strong>
-              <span>${template.blocks.length} ${template.blocks.length === 1 ? "block" : "blocks"}</span>
+              <span>${template.blocks.length} ${template.blocks.length === 1 ? "card" : "cards"}</span>
             </button>
             <button class="icon-btn" type="button" data-action="delete-template" data-template-id="${template.id}" title="Delete default workout">X</button>
           </article>
@@ -401,7 +409,7 @@ function renderTemplatePanel() {
   `;
 }
 
-function renderExerciseSearchResult(exercise) {
+function renderExerciseSearchResult(exercise, addingToCard = false) {
   return `
     <div class="search-result">
       <div>
@@ -411,7 +419,7 @@ function renderExerciseSearchResult(exercise) {
           <span>${escapeHtml(exercise.equipment)}</span>
         </div>
       </div>
-      <button class="btn subtle" type="button" data-action="add-exercise-to-draft" data-exercise-id="${exercise.id}">Add</button>
+      <button class="btn subtle" type="button" data-action="add-exercise-to-draft" data-exercise-id="${exercise.id}">${addingToCard ? "Add here" : "Start card"}</button>
     </div>
   `;
 }
@@ -424,19 +432,19 @@ function setGridClass(settings) {
 function renderSelectedBlock(block, blockIndex, settings) {
   const exerciseCount = block.exercises.length;
   const setCount = block.exercises.reduce((total, exercise) => total + exercise.sets.length, 0);
-  const title = exerciseCount === 1 ? "Exercise" : "Circuit";
+  const type = exerciseCount === 1 ? "Single exercise" : "Circuit";
   return `
     <section class="exercise-card block-card ${state.addToBlockId === block.draftId ? "targeted" : ""}">
       <header class="exercise-header">
         <div class="exercise-title">
-          <h3>${title} ${blockIndex + 1}</h3>
-          <div class="meta-line">${exerciseCount} ${exerciseCount === 1 ? "exercise" : "exercises"} - ${setCount} ${setCount === 1 ? "set" : "sets"}</div>
+          <h3>Card ${blockIndex + 1}</h3>
+          <div class="meta-line">${type} - ${exerciseCount} ${exerciseCount === 1 ? "exercise" : "exercises"} - ${setCount} ${setCount === 1 ? "set" : "sets"}</div>
         </div>
         <button class="icon-btn" type="button" data-action="remove-block" data-draft-block-id="${block.draftId}" title="Remove block">X</button>
       </header>
       ${settings.showRest ? `
         <div class="form-row block-rest-row">
-          <label for="rest-${block.draftId}">Rest for block (seconds)</label>
+          <label for="rest-${block.draftId}">Rest for card (seconds)</label>
           <input id="rest-${block.draftId}" type="number" min="0" max="3600" inputmode="numeric" value="${escapeHtml(block.restSeconds)}" data-block-field="restSeconds" data-draft-block-id="${block.draftId}" placeholder="Optional">
         </div>
       ` : ""}
@@ -444,7 +452,7 @@ function renderSelectedBlock(block, blockIndex, settings) {
         ${block.exercises.map((exercise) => renderBlockExercise(block, exercise, settings)).join("")}
       </div>
       <div class="button-row" style="margin-top: 10px;">
-        <button class="btn secondary" type="button" data-action="target-block" data-draft-block-id="${block.draftId}">Add exercise to block</button>
+        <button class="btn secondary" type="button" data-action="target-block" data-draft-block-id="${block.draftId}">Add exercise to this card</button>
       </div>
     </section>
   `;
@@ -536,7 +544,7 @@ function renderWorkoutCard(workout) {
         <div>
           <h3>${escapeHtml(workout.date)} - ${displayTime(workout.startTime)}${duration ? ` - ${escapeHtml(duration)}` : ""}</h3>
           <div class="meta-line">
-            <span>${blocks.length} ${blocks.length === 1 ? "block" : "blocks"}</span>
+            <span>${blocks.length} ${blocks.length === 1 ? "card" : "cards"}</span>
             <span>${exerciseCount} exercises</span>
             <span>${setCount} sets</span>
             ${workout.energyScore ? `<span>Energy ${workout.energyScore}/5</span>` : ""}
@@ -586,7 +594,7 @@ function renderHistoryBlock(block) {
   return `
     <div class="history-block">
       <div class="meta-line">
-        <strong>Block ${block.order}</strong>
+        <strong>Card ${block.order}</strong>
         ${block.restSeconds === null || block.restSeconds === undefined ? "" : `<span>${block.restSeconds}s rest</span>`}
       </div>
       ${block.exercises.map(renderHistoryExercise).join("")}
@@ -715,7 +723,7 @@ function renderSettingsView() {
         <label class="toggle">
           <span>
             <strong>Rest time</strong>
-            <span class="muted">Show seconds between workout blocks.</span>
+            <span class="muted">Show seconds between workout cards.</span>
           </span>
           <input type="checkbox" data-setting="showRest" ${settings.showRest ? "checked" : ""}>
         </label>
@@ -981,6 +989,14 @@ document.addEventListener("click", async (event) => {
       return;
     }
 
+    if (action === "start-new-block") {
+      state.addToBlockId = "";
+      state.exerciseSearch = "";
+      render();
+      requestAnimationFrame(() => document.querySelector('[data-search="log-exercise"]')?.focus());
+      return;
+    }
+
     if (action === "cancel-block-target") {
       state.addToBlockId = "";
       state.exerciseSearch = "";
@@ -1102,7 +1118,7 @@ document.addEventListener("input", (event) => {
     if (matchesNode) {
       matchesNode.innerHTML = matches.length === 0
         ? `<div class="empty-state">No visible exercises match that search.</div>`
-        : matches.map(renderExerciseSearchResult).join("");
+        : matches.map((exercise) => renderExerciseSearchResult(exercise, Boolean(targetBlock))).join("");
     }
   }
 

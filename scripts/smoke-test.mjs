@@ -130,6 +130,49 @@ try {
               ]
             }
           ]
+        },
+        {
+          restSeconds: 120,
+          exercises: [
+            {
+              exerciseId: "leg-press",
+              nameSnapshot: "Leg Press",
+              sets: [
+                { reps: 10, weightLb: 180, rir: 2 }
+              ]
+            }
+          ]
+        },
+        {
+          restSeconds: 60,
+          exercises: [
+            {
+              exerciseId: "dumbbell-curl",
+              nameSnapshot: "Dumbbell Curl",
+              sets: [
+                { reps: 12, weightLb: 25, rir: 1 }
+              ]
+            }
+          ]
+        },
+        {
+          restSeconds: 45,
+          exercises: [
+            {
+              exerciseId: "plank",
+              nameSnapshot: "Plank",
+              sets: [
+                { reps: 1, weightLb: 0, rir: 0 }
+              ]
+            },
+            {
+              exerciseId: "hammer-curl",
+              nameSnapshot: "Hammer Curl",
+              sets: [
+                { reps: 10, weightLb: 30, rir: 2 }
+              ]
+            }
+          ]
         }
       ]
     }
@@ -168,7 +211,10 @@ try {
   const blankDurationWorkout = daniWorkouts.find((workout) => workout.date === "2026-05-20");
   assert(pullWorkout.durationMinutes === 75, "Workout should store optional duration minutes.");
   assert(blankDurationWorkout.durationMinutes === null, "Blank workout duration should stay blank.");
+  assert(pullWorkout.blocks.length === 4, "Workout should support multiple cards in one session.");
   assert(pullWorkout.blocks[0].exercises.length === 2, "Workout should support multi-exercise blocks.");
+  assert(pullWorkout.blocks[1].exercises.length === 1, "Workout should support single-exercise cards after a circuit.");
+  assert(pullWorkout.blocks[3].exercises.length === 2, "Workout should support a second circuit after single cards.");
   assert(pullWorkout.blocks[0].restSeconds === 90, "Rest should live on the workout block.");
 
   const template = (await api("/api/templates", {
@@ -209,6 +255,7 @@ try {
   assert(csv.includes("profile_nickname,date,start_time,duration_minutes"), "CSV export should include duration headers.");
   assert(csv.includes("Dani,2026-05-19,09:00,75"), "CSV export should include the saved workout duration.");
   assert(csv.includes("90,1,Lat Pulldown"), "CSV export should include block rest and exercise details.");
+  assert(csv.includes("45,1,Plank"), "CSV export should include later circuit cards.");
 
   console.log("Smoke test passed.");
 } finally {
