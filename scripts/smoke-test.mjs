@@ -161,8 +161,9 @@ try {
             {
               exerciseId: "plank",
               nameSnapshot: "Plank",
+              trackingMode: "time",
               sets: [
-                { reps: 1, weightLb: 0, rir: 0 }
+                { durationSeconds: 30, rir: 4 }
               ]
             },
             {
@@ -216,6 +217,10 @@ try {
   assert(pullWorkout.blocks[1].exercises.length === 1, "Workout should support single-exercise cards after a circuit.");
   assert(pullWorkout.blocks[3].exercises.length === 2, "Workout should support a second circuit after single cards.");
   assert(pullWorkout.blocks[0].restSeconds === 90, "Rest should live on the workout block.");
+  const timedExercise = pullWorkout.blocks[3].exercises[0];
+  assert(timedExercise.trackingMode === "time", "Exercise tracking mode should persist.");
+  assert(timedExercise.sets[0].durationSeconds === 30, "Time-mode exercises should store duration seconds.");
+  assert(timedExercise.sets[0].rir === null, "Time-mode exercises should not store RIR.");
 
   const template = (await api("/api/templates", {
     method: "POST",
@@ -255,7 +260,8 @@ try {
   assert(csv.includes("profile_nickname,date,start_time,duration_minutes"), "CSV export should include duration headers.");
   assert(csv.includes("Dani,2026-05-19,09:00,75"), "CSV export should include the saved workout duration.");
   assert(csv.includes("90,1,Lat Pulldown"), "CSV export should include block rest and exercise details.");
-  assert(csv.includes("45,1,Plank"), "CSV export should include later circuit cards.");
+  assert(csv.includes("45,1,Plank,time"), "CSV export should include later circuit cards.");
+  assert(csv.includes("Plank,time,1,,,30,,"), "CSV export should include time-mode duration seconds without RIR.");
 
   console.log("Smoke test passed.");
 } finally {

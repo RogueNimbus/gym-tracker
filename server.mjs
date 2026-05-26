@@ -18,7 +18,7 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const SUPABASE_TABLE = process.env.SUPABASE_TABLE || "app_state";
 const SUPABASE_STATE_ID = process.env.SUPABASE_STATE_ID || "default";
 const USE_SUPABASE = Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 let writeQueue = Promise.resolve();
 
@@ -225,9 +225,11 @@ function workoutsCsv(profile, workouts) {
     "block_rest_seconds",
     "exercise_order",
     "exercise_name",
+    "tracking_mode",
     "set_number",
     "reps",
     "weight_lb",
+    "duration_seconds",
     "rir",
     "created_at"
   ];
@@ -248,9 +250,11 @@ function workoutsCsv(profile, workouts) {
             block.restSeconds,
             exercise.order,
             exercise.nameSnapshot,
+            trackingMode(exercise),
             set.setNumber,
             set.reps,
             set.weightLb,
+            set.durationSeconds,
             set.rir,
             workout.createdAt
           ]);
@@ -390,12 +394,17 @@ function durationFromTimes(startTime, endTime) {
   return (endIndex - startIndex) * 30;
 }
 
+function trackingMode(exercise = {}) {
+  return exercise.trackingMode === "time" ? "time" : "reps";
+}
+
 function normalizeStoredSet(set = {}, setIndex = 0) {
   return {
     id: safeId(set.id),
     setNumber: cleanOrder(set.setNumber, setIndex + 1),
     reps: storedNumber(set.reps, { min: 0, max: 999, integer: true }),
     weightLb: storedNumber(set.weightLb, { min: 0, max: 2000 }),
+    durationSeconds: storedNumber(set.durationSeconds, { min: 0, max: 3600, integer: true }),
     rir: storedNumber(set.rir, { min: 0, max: 6, integer: true })
   };
 }
@@ -414,6 +423,7 @@ function normalizeStoredExercise(exercise = {}, exerciseIndex = 0) {
     id: safeId(exercise.id),
     exerciseId: exercise.exerciseId || null,
     nameSnapshot: cleanText(exercise.nameSnapshot || exercise.name || "Exercise").slice(0, 80),
+    trackingMode: trackingMode(exercise),
     order: cleanOrder(exercise.order, exerciseIndex + 1),
     sets: (Array.isArray(exercise.sets) ? exercise.sets : [])
       .map((set, setIndex) => normalizeStoredSet(set, setIndex))
@@ -511,20 +521,38 @@ function normalizeIncomingBlocks(db, body) {
     rawExercises.forEach((exercise, exerciseIndex) => {
       const baseExercise = db.exercises.find((item) => item.id === exercise.exerciseId);
       const nameSnapshot = cleanText(exercise.nameSnapshot || baseExercise?.name || "Exercise").slice(0, 80);
+      const mode = trackingMode(exercise);
       if (!Array.isArray(exercise.sets) || exercise.sets.length === 0) return;
 
       const sets = exercise.sets.map((set, setIndex) => {
+        if (mode === "time") {
+          const durationSeconds = parseOptionalNumber(set.durationSeconds, { min: 0, max: 3600, integer: true });
+          if (durationSeconds === undefined) {
+            throw Object.assign(new Error("Exercise time is outside the allowed range."), { status: 400 });
+          }
+          return {
+            id: randomUUID(),
+            setNumber: setIndex + 1,
+            reps: null,
+            weightLb: null,
+            durationSeconds,
+            rir: null
+          };
+        }
+
         const reps = parseOptionalNumber(set.reps, { min: 0, max: 999, integer: true });
         const weightLb = parseOptionalNumber(set.weightLb, { min: 0, max: 2000 });
         const rir = parseOptionalNumber(set.rir, { min: 0, max: 6, integer: true });
         if ([reps, weightLb, rir].some((value) => value === undefined)) {
           throw Object.assign(new Error("Set values are outside the allowed range."), { status: 400 });
         }
+
         return {
           id: randomUUID(),
           setNumber: setIndex + 1,
           reps,
           weightLb,
+          durationSeconds: null,
           rir
         };
       });
@@ -533,6 +561,7 @@ function normalizeIncomingBlocks(db, body) {
         id: randomUUID(),
         exerciseId: exercise.exerciseId || null,
         nameSnapshot,
+        trackingMode: mode,
         order: exerciseIndex + 1,
         sets
       });

@@ -509,6 +509,35 @@ button:focus-visible {
   margin-bottom: 10px;
 }
 
+.block-exercise-title {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.mode-toggle {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(74px, 1fr));
+  width: min(100%, 180px);
+  padding: 3px;
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.mode-toggle button {
+  min-height: 34px;
+  border-radius: 6px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
+.mode-toggle button.active {
+  color: var(--surface);
+  background: var(--accent);
+}
+
 .set-grid {
   display: grid;
   gap: 8px;
@@ -525,6 +554,11 @@ button:focus-visible {
 .set-row.no-rir,
 .set-head.no-rir {
   grid-template-columns: 42px minmax(60px, 1fr) minmax(76px, 1fr) 40px;
+}
+
+.set-row.time-mode,
+.set-head.time-mode {
+  grid-template-columns: 42px minmax(92px, 1fr) 40px;
 }
 
 .set-head {

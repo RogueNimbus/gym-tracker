@@ -424,7 +424,12 @@ function renderExerciseSearchResult(exercise, addingToCard = false) {
   `;
 }
 
-function setGridClass(settings) {
+function trackingMode(exercise) {
+  return exercise.trackingMode === "time" ? "time" : "reps";
+}
+
+function setGridClass(settings, exercise) {
+  if (trackingMode(exercise) === "time") return "time-mode";
   if (!settings.showRir) return "no-rir";
   return "";
 }
@@ -459,19 +464,28 @@ function renderSelectedBlock(block, blockIndex, settings) {
 }
 
 function renderBlockExercise(block, exercise, settings) {
-  const gridClass = setGridClass(settings);
+  const mode = trackingMode(exercise);
+  const gridClass = setGridClass(settings, exercise);
   return `
     <div class="block-exercise">
       <div class="block-exercise-header">
-        <strong>${escapeHtml(exercise.nameSnapshot)}</strong>
+        <div class="block-exercise-title">
+          <strong>${escapeHtml(exercise.nameSnapshot)}</strong>
+          <div class="mode-toggle" role="group" aria-label="Tracking mode">
+            <button class="${mode === "reps" ? "active" : ""}" type="button" data-action="set-exercise-mode" data-tracking-mode="reps" data-draft-block-id="${block.draftId}" data-draft-exercise-id="${exercise.draftId}">Reps/Lb</button>
+            <button class="${mode === "time" ? "active" : ""}" type="button" data-action="set-exercise-mode" data-tracking-mode="time" data-draft-block-id="${block.draftId}" data-draft-exercise-id="${exercise.draftId}">Time</button>
+          </div>
+        </div>
         <button class="icon-btn" type="button" data-action="remove-exercise-from-block" data-draft-block-id="${block.draftId}" data-draft-exercise-id="${exercise.draftId}" title="Remove exercise">X</button>
       </div>
       <div class="set-grid">
         <div class="set-head ${gridClass}">
           <span>Set</span>
-          <span>Reps</span>
-          <span>Lb</span>
-          ${settings.showRir ? "<span>RIR</span>" : ""}
+          ${mode === "time" ? "<span>Time</span>" : `
+            <span>Reps</span>
+            <span>Lb</span>
+            ${settings.showRir ? "<span>RIR</span>" : ""}
+          `}
           <span></span>
         </div>
         ${exercise.sets.map((set, index) => renderSetRow(block, exercise, set, index, settings)).join("")}
@@ -485,7 +499,17 @@ function renderBlockExercise(block, exercise, settings) {
 }
 
 function renderSetRow(block, exercise, set, index, settings) {
-  const gridClass = setGridClass(settings);
+  const mode = trackingMode(exercise);
+  const gridClass = setGridClass(settings, exercise);
+  if (mode === "time") {
+    return `
+      <div class="set-row ${gridClass}">
+        <div class="set-number">${index + 1}</div>
+        <input type="number" min="0" max="3600" inputmode="numeric" value="${escapeHtml(set.durationSeconds)}" data-set-field="durationSeconds" data-draft-block-id="${block.draftId}" data-draft-exercise-id="${exercise.draftId}" data-set-id="${set.draftId}" aria-label="Time in seconds" placeholder="Sec">
+        <button class="icon-btn" type="button" data-action="remove-set" data-draft-block-id="${block.draftId}" data-draft-exercise-id="${exercise.draftId}" data-set-id="${set.draftId}" title="Remove set">X</button>
+      </div>
+    `;
+  }
   return `
     <div class="set-row ${gridClass}">
       <div class="set-number">${index + 1}</div>
@@ -603,16 +627,22 @@ function renderHistoryBlock(block) {
 }
 
 function renderHistoryExercise(exercise) {
+  const mode = trackingMode(exercise);
   return `
     <div class="history-exercise">
       <strong>${escapeHtml(exercise.nameSnapshot)}</strong>
       ${exercise.sets.map((set) => {
-        const parts = [
-          `Set ${set.setNumber}`,
-          set.reps === null ? null : `${set.reps} reps`,
-          set.weightLb === null ? null : `${set.weightLb} lb`,
-          set.rir === null ? null : `RIR ${set.rir}`
-        ].filter(Boolean);
+        const parts = mode === "time"
+          ? [
+              `Set ${set.setNumber}`,
+              set.durationSeconds === null || set.durationSeconds === undefined ? null : `${set.durationSeconds} sec`
+            ].filter(Boolean)
+          : [
+              `Set ${set.setNumber}`,
+              set.reps === null ? null : `${set.reps} reps`,
+              set.weightLb === null ? null : `${set.weightLb} lb`,
+              set.rir === null ? null : `RIR ${set.rir}`
+            ].filter(Boolean);
         return `<div class="history-set">${escapeHtml(parts.join(" - "))}</div>`;
       }).join("")}
     </div>
@@ -767,6 +797,7 @@ function blankSet(seed = {}) {
     draftId: draftId(),
     reps: seed.reps ?? "",
     weightLb: seed.weightLb ?? "",
+    durationSeconds: seed.durationSeconds ?? "",
     rir: seed.rir ?? ""
   };
 }
@@ -776,6 +807,7 @@ function draftExerciseFromSaved(exercise) {
     draftId: draftId(),
     exerciseId: exercise.exerciseId,
     nameSnapshot: exercise.nameSnapshot,
+    trackingMode: trackingMode(exercise),
     sets: (exercise.sets || []).map(blankSet)
   };
 }
@@ -793,6 +825,7 @@ function draftExerciseFromCatalog(exercise) {
     draftId: draftId(),
     exerciseId: exercise.id,
     nameSnapshot: exercise.name,
+    trackingMode: "reps",
     sets: [blankSet()]
   };
 }
@@ -814,10 +847,12 @@ function draftBlocksPayload(draft, settings) {
     exercises: block.exercises.map((exercise) => ({
       exerciseId: exercise.exerciseId,
       nameSnapshot: exercise.nameSnapshot,
+      trackingMode: trackingMode(exercise),
       sets: exercise.sets.map((set) => ({
-        reps: set.reps,
-        weightLb: set.weightLb,
-        rir: settings.showRir ? set.rir : null
+        reps: trackingMode(exercise) === "reps" ? set.reps : null,
+        weightLb: trackingMode(exercise) === "reps" ? set.weightLb : null,
+        durationSeconds: trackingMode(exercise) === "time" ? set.durationSeconds : null,
+        rir: trackingMode(exercise) === "reps" && settings.showRir ? set.rir : null
       }))
     }))
   }));
@@ -1019,6 +1054,14 @@ document.addEventListener("click", async (event) => {
         state.draft.blocks = state.draft.blocks.filter((item) => item.draftId !== block.draftId);
         if (state.addToBlockId === block.draftId) state.addToBlockId = "";
       }
+      render();
+      return;
+    }
+
+    if (action === "set-exercise-mode") {
+      const exercise = findDraftExercise(button.dataset.draftBlockId, button.dataset.draftExerciseId);
+      if (!exercise) return;
+      exercise.trackingMode = button.dataset.trackingMode === "time" ? "time" : "reps";
       render();
       return;
     }
