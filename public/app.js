@@ -13,6 +13,7 @@ const state = {
   exerciseSearch: "",
   exerciseManagerSearch: "",
   editingExerciseId: "",
+  editingWorkoutId: "",
   addToBlockId: "",
   templateName: "",
   draft: null
@@ -69,6 +70,26 @@ function newDraft(template = null) {
     durationMinutePart: "",
     energyScore: 3,
     blocks: template ? template.blocks.map(draftBlockFromSaved) : []
+  };
+}
+
+function durationParts(durationMinutes) {
+  if (!Number.isFinite(durationMinutes)) return { hours: "", minutes: "" };
+  return {
+    hours: Math.floor(durationMinutes / 60) || "",
+    minutes: durationMinutes % 60 || ""
+  };
+}
+
+function draftFromWorkout(workout) {
+  const duration = durationParts(workout.durationMinutes);
+  return {
+    date: workout.date || today(),
+    startTime: workout.startTime || defaultStartTime(),
+    durationHours: duration.hours,
+    durationMinutePart: duration.minutes,
+    energyScore: workout.energyScore ?? "",
+    blocks: workoutBlocks(workout).map(draftBlockFromSaved)
   };
 }
 
@@ -157,6 +178,7 @@ async function selectProfile(profileId) {
   if (!profile) return;
   state.profile = profile;
   state.draft = newDraft();
+  state.editingWorkoutId = "";
   state.view = "log";
   state.error = "";
   state.notice = "";
@@ -172,6 +194,7 @@ function switchProfile() {
   state.workouts = [];
   state.templates = [];
   state.addToBlockId = "";
+  state.editingWorkoutId = "";
   state.templateName = "";
   state.error = "";
   state.notice = "";
@@ -301,6 +324,7 @@ function renderView() {
 function renderLogView() {
   const settings = activeSettings();
   const draft = state.draft || newDraft();
+  const isEditingWorkout = Boolean(state.editingWorkoutId);
   const targetBlock = findDraftBlock(state.addToBlockId);
   const targetBlockNumber = targetBlock ? draft.blocks.indexOf(targetBlock) + 1 : 0;
   const targetExerciseIds = new Set((targetBlock?.exercises || []).map((exercise) => exercise.exerciseId));
@@ -375,7 +399,11 @@ function renderLogView() {
     </section>
 
     <div class="save-bar">
-      <button class="btn" type="button" data-action="save-workout" ${draft.blocks.length === 0 ? "disabled" : ""}>Save workout</button>
+      ${isEditingWorkout ? `<div class="success">Editing saved workout. Updating will replace the original entry.</div>` : ""}
+      <div class="button-row">
+        <button class="btn" type="button" data-action="save-workout" ${draft.blocks.length === 0 ? "disabled" : ""}>${isEditingWorkout ? "Update workout" : "Save workout"}</button>
+        ${isEditingWorkout ? `<button class="btn secondary" type="button" data-action="cancel-edit-workout">Cancel edit</button>` : ""}
+      </div>
       <form class="template-save-form" data-form="save-template">
         <input name="name" maxlength="50" value="${escapeHtml(state.templateName)}" data-template-name placeholder="Default workout name">
         <button class="btn secondary" type="submit" ${draft.blocks.length === 0 ? "disabled" : ""}>Save as default</button>
@@ -574,7 +602,10 @@ function renderWorkoutCard(workout) {
             ${workout.energyScore ? `<span>Energy ${workout.energyScore}/5</span>` : ""}
           </div>
         </div>
-        <button class="icon-btn" type="button" data-action="delete-workout" data-workout-id="${workout.id}" title="Delete workout">X</button>
+        <div class="button-row">
+          <button class="btn secondary" type="button" data-action="edit-workout" data-workout-id="${workout.id}">Edit</button>
+          <button class="icon-btn" type="button" data-action="delete-workout" data-workout-id="${workout.id}" title="Delete workout">X</button>
+        </div>
       </header>
       <details>
         <summary>Details</summary>
@@ -841,9 +872,9 @@ function draftDurationMinutes(draft) {
   return total > 0 ? total : null;
 }
 
-function draftBlocksPayload(draft, settings) {
+function draftBlocksPayload(draft, settings, { includeHiddenValues = false } = {}) {
   return draft.blocks.map((block) => ({
-    restSeconds: settings.showRest ? block.restSeconds : null,
+    restSeconds: settings.showRest || includeHiddenValues ? block.restSeconds : null,
     exercises: block.exercises.map((exercise) => ({
       exerciseId: exercise.exerciseId,
       nameSnapshot: exercise.nameSnapshot,
@@ -852,7 +883,7 @@ function draftBlocksPayload(draft, settings) {
         reps: trackingMode(exercise) === "reps" ? set.reps : null,
         weightLb: trackingMode(exercise) === "reps" ? set.weightLb : null,
         durationSeconds: trackingMode(exercise) === "time" ? set.durationSeconds : null,
-        rir: trackingMode(exercise) === "reps" && settings.showRir ? set.rir : null
+        rir: trackingMode(exercise) === "reps" && (settings.showRir || includeHiddenValues) ? set.rir : null
       }))
     }))
   }));
@@ -869,21 +900,26 @@ async function saveWorkout() {
       return;
     }
     const settings = activeSettings();
+    const isEditingWorkout = Boolean(state.editingWorkoutId);
     const body = {
       profileId: state.profile.id,
       date: draft.date,
       startTime: draft.startTime,
       durationMinutes,
-      energyScore: settings.showEnergy ? draft.energyScore : null,
-      blocks: draftBlocksPayload(draft, settings)
+      energyScore: settings.showEnergy || isEditingWorkout ? draft.energyScore : null,
+      blocks: draftBlocksPayload(draft, settings, { includeHiddenValues: isEditingWorkout })
     };
-    await api("/api/workouts", { method: "POST", body });
+    const path = isEditingWorkout
+      ? `/api/workouts/${encodeURIComponent(state.editingWorkoutId)}`
+      : "/api/workouts";
+    await api(path, { method: isEditingWorkout ? "PATCH" : "POST", body });
     state.draft = newDraft();
     state.exerciseSearch = "";
     state.addToBlockId = "";
+    state.editingWorkoutId = "";
     await loadProfileData();
     state.view = "history";
-    setNotice("Workout saved.");
+    setNotice(isEditingWorkout ? "Workout updated." : "Workout saved.");
   } catch (error) {
     setError(error.message);
   }
@@ -1102,12 +1138,35 @@ document.addEventListener("click", async (event) => {
       return;
     }
 
+    if (action === "edit-workout") {
+      const workout = state.workouts.find((item) => item.id === button.dataset.workoutId);
+      if (!workout) return;
+      state.draft = draftFromWorkout(workout);
+      state.editingWorkoutId = workout.id;
+      state.exerciseSearch = "";
+      state.addToBlockId = "";
+      state.templateName = "";
+      state.view = "log";
+      setNotice("Editing saved workout.");
+      return;
+    }
+
+    if (action === "cancel-edit-workout") {
+      state.draft = newDraft();
+      state.editingWorkoutId = "";
+      state.exerciseSearch = "";
+      state.addToBlockId = "";
+      setNotice("Workout edit cancelled.");
+      return;
+    }
+
     if (action === "load-template") {
       const template = state.templates.find((item) => item.id === button.dataset.templateId);
       if (!template) return;
       state.draft = newDraft(template);
       state.exerciseSearch = "";
       state.addToBlockId = "";
+      state.editingWorkoutId = "";
       state.view = "log";
       setNotice("Default workout loaded.");
       return;

@@ -871,6 +871,29 @@ async function handleApi(req, res, url) {
   }
 
   const workoutMatch = url.pathname.match(/^\/api\/workouts\/([^/]+)$/);
+  if (req.method === "PATCH" && workoutMatch) {
+    const body = await parseBody(req);
+    const normalized = normalizeWorkout(await readDb(), body);
+    if (!normalized.ok) return sendError(res, normalized.status, normalized.message);
+    const workout = await withDb(async (db) => {
+      const index = db.workouts.findIndex((item) => item.id === workoutMatch[1] && item.profileId === body.profileId);
+      if (index < 0) throw Object.assign(new Error("Workout was not found."), { status: 404 });
+      const fresh = normalizeWorkout(db, body);
+      if (!fresh.ok) throw Object.assign(new Error(fresh.message), { status: fresh.status });
+      const existing = db.workouts[index];
+      const updated = {
+        ...fresh.workout,
+        id: existing.id,
+        createdAt: existing.createdAt,
+        updatedAt: nowIso()
+      };
+      if (existing.order !== undefined) updated.order = existing.order;
+      db.workouts[index] = updated;
+      return updated;
+    });
+    return sendJson(res, 200, { workout });
+  }
+
   if (req.method === "DELETE" && workoutMatch) {
     const profileId = url.searchParams.get("profileId");
     const result = await withDb(async (db) => {

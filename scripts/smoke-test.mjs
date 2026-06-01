@@ -208,7 +208,7 @@ try {
   const alexWorkouts = (await api(`/api/workouts?profileId=${alex.id}`)).workouts;
   assert(daniWorkouts.length === 2, "Dani should have two workouts.");
   assert(alexWorkouts.length === 0, "Alex should have separate workout history.");
-  const pullWorkout = daniWorkouts.find((workout) => workout.date === "2026-05-19");
+  let pullWorkout = daniWorkouts.find((workout) => workout.date === "2026-05-19");
   const blankDurationWorkout = daniWorkouts.find((workout) => workout.date === "2026-05-20");
   assert(pullWorkout.durationMinutes === 75, "Workout should store optional duration minutes.");
   assert(blankDurationWorkout.durationMinutes === null, "Blank workout duration should stay blank.");
@@ -221,6 +221,31 @@ try {
   assert(timedExercise.trackingMode === "time", "Exercise tracking mode should persist.");
   assert(timedExercise.sets[0].durationSeconds === 30, "Time-mode exercises should store duration seconds.");
   assert(timedExercise.sets[0].rir === null, "Time-mode exercises should not store RIR.");
+
+  const originalCreatedAt = pullWorkout.createdAt;
+  const editedBlocks = JSON.parse(JSON.stringify(pullWorkout.blocks));
+  editedBlocks[0].restSeconds = 105;
+  editedBlocks[3].exercises[0].sets[0].durationSeconds = 45;
+  await api(`/api/workouts/${pullWorkout.id}`, {
+    method: "PATCH",
+    body: {
+      profileId: dani.id,
+      date: "2026-05-19",
+      startTime: "09:30",
+      durationMinutes: 90,
+      energyScore: 5,
+      blocks: editedBlocks
+    }
+  });
+  const editedWorkouts = (await api(`/api/workouts?profileId=${dani.id}`)).workouts;
+  assert(editedWorkouts.length === 2, "Editing a workout should not create a duplicate.");
+  pullWorkout = editedWorkouts.find((workout) => workout.id === pullWorkout.id);
+  assert(pullWorkout.createdAt === originalCreatedAt, "Edited workout should keep its original created date.");
+  assert(pullWorkout.startTime === "09:30", "Edited workout should update start time.");
+  assert(pullWorkout.durationMinutes === 90, "Edited workout should update duration.");
+  assert(pullWorkout.energyScore === 5, "Edited workout should update energy.");
+  assert(pullWorkout.blocks[0].restSeconds === 105, "Edited workout should update card rest.");
+  assert(pullWorkout.blocks[3].exercises[0].sets[0].durationSeconds === 45, "Edited workout should update time-mode sets.");
 
   const template = (await api("/api/templates", {
     method: "POST",
@@ -258,10 +283,10 @@ try {
   const csv = await csvResponse.text();
   assert(csvResponse.ok, "CSV export should return successfully.");
   assert(csv.includes("profile_nickname,date,start_time,duration_minutes"), "CSV export should include duration headers.");
-  assert(csv.includes("Dani,2026-05-19,09:00,75"), "CSV export should include the saved workout duration.");
-  assert(csv.includes("90,1,Lat Pulldown"), "CSV export should include block rest and exercise details.");
+  assert(csv.includes("Dani,2026-05-19,09:30,90"), "CSV export should include the edited workout duration.");
+  assert(csv.includes("105,1,Lat Pulldown"), "CSV export should include edited block rest and exercise details.");
   assert(csv.includes("45,1,Plank,time"), "CSV export should include later circuit cards.");
-  assert(csv.includes("Plank,time,1,,,30,,"), "CSV export should include time-mode duration seconds without RIR.");
+  assert(csv.includes("Plank,time,1,,,45,,"), "CSV export should include edited time-mode duration seconds without RIR.");
 
   console.log("Smoke test passed.");
 } finally {
